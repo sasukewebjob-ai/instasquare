@@ -10,6 +10,8 @@
     const JPEG_QUALITY = 0.92;
     const PREVIEW_MAX_W = 540;
     const PREVIEW_MAX_H = 600;
+    const ZOOM_MIN = 1.0;
+    const ZOOM_MAX = 4.0;
 
     // ---- DOM ----
     const $ = (id) => document.getElementById(id);
@@ -53,11 +55,13 @@
     let faceDetector = null;
     let faceDetectionSupported = false;
 
-    // Pointer / drag
+    // Pointer / drag / pinch
+    const activePointers = new Map();
     let isDragging = false;
     let dragStartX = 0, dragStartY = 0;
     let dragStartCx = 0.5, dragStartCy = 0.5;
-    let activePointerId = null;
+    let pinchStartDist = 0;
+    let pinchStartZoom = 1;
 
     // ---- Init ----
     initFaceDetection();
@@ -201,15 +205,16 @@
         const bw = image.bitmap.width;
         const bh = image.bitmap.height;
         const baseScale = Math.max(out.w / bw, out.h / bh);
+        const scale = baseScale * (image.zoom || 1);
 
         if (isX) {
-            const half = (out.w / 2) / (bw * baseScale);
+            const half = (out.w / 2) / (bw * scale);
             const minV = half;
             const maxV = 1 - half;
             if (maxV <= minV) return 0.5;
             return Math.max(minV, Math.min(maxV, value));
         } else {
-            const half = (out.h / 2) / (bh * baseScale);
+            const half = (out.h / 2) / (bh * scale);
             const minV = half;
             const maxV = 1 - half;
             if (maxV <= minV) return 0.5;
@@ -289,14 +294,15 @@
         const bw = image.bitmap.width;
         const bh = image.bitmap.height;
         const baseScale = Math.max(outW / bw, outH / bh);
+        const scale = baseScale * (image.zoom || 1);
 
-        const centerOutX = outW / 2 - (image.cropCx - 0.5) * bw * baseScale;
-        const centerOutY = outH / 2 - (image.cropCy - 0.5) * bh * baseScale;
+        const centerOutX = outW / 2 - (image.cropCx - 0.5) * bw * scale;
+        const centerOutY = outH / 2 - (image.cropCy - 0.5) * bh * scale;
 
         const centerDispX = centerOutX * dispScale;
         const centerDispY = centerOutY * dispScale;
-        const drawW = bw * baseScale * dispScale;
-        const drawH = bh * baseScale * dispScale;
+        const drawW = bw * scale * dispScale;
+        const drawH = bh * scale * dispScale;
 
         targetCtx.save();
         targetCtx.imageSmoothingEnabled = true;
@@ -492,7 +498,8 @@
                     cropCy: suggested.cy,
                     autoSuggested: { cx: suggested.cx, cy: suggested.cy },
                     blur: 0,
-                    brightness: 0
+                    brightness: 0,
+                    zoom: 1.0
                 };
 
                 imageObj.cropCx = clampCrop(imageObj.cropCx, imageObj, true);
@@ -572,6 +579,7 @@
         if (!image) return;
         image.blur = 0;
         image.brightness = 0;
+        image.zoom = 1.0;
         image.cropCx = image.autoSuggested.cx;
         image.cropCy = image.autoSuggested.cy;
         image.cropCx = clampCrop(image.cropCx, image, true);
@@ -646,56 +654,117 @@
         }, 3000);
     }
 
-    // ---- Drag handlers ----
+    // ---- Drag + Pinch handlers ----
     function attachDragHandlers() {
         editorPreview.addEventListener('pointerdown', (e) => {
             if (editingId === null) return;
-            if (activePointerId !== null) return; // ignore additional pointers
-            activePointerId = e.pointerId;
-            isDragging = true;
-            editorPreview.classList.add('dragging');
-            try { editorPreview.setPointerCapture(e.pointerId); } catch (_) { }
-            dragStartX = e.clientX;
-            dragStartY = e.clientY;
-            const image = images.find(i => i.id === editingId);
-            if (image) {
-                dragStartCx = image.cropCx;
-                dragStartCy = image.cropCy;
+            activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+            if (activePointers.size === 1) {
+                isDragging = true;
+                editorPreview.classList.add('dragging');
+                try { editorPreview.setPointerCapture(e.pointerId); } catch (_) { }
+                dragStartX = e.clientX;
+                dragStartY = e.clientY;
+                const image = images.find(i => i.id === editingId);
+                if (image) {
+                    dragStartCx = image.cropCx;
+                    dragStartCy = image.cropCy;
+                }
+            } else if (activePointers.size === 2) {
+                // Start pinch: stop drag, record distance and current zoom
+                isDragging = false;
+                editorPreview.classList.remove('dragging');
+                const pts = [...activePointers.values()];
+                pinchStartDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+                const image = images.find(i => i.id === editingId);
+                if (image) pinchStartZoom = image.zoom || 1;
             }
         });
 
         editorPreview.addEventListener('pointermove', (e) => {
-            if (!isDragging || e.pointerId !== activePointerId || editingId === null) return;
+            if (!activePointers.has(e.pointerId)) return;
+            activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+            if (editingId === null) return;
             const image = images.find(i => i.id === editingId);
             if (!image) return;
 
-            const dx = e.clientX - dragStartX;
-            const dy = e.clientY - dragStartY;
+            // Pinch — 2 pointers
+            if (activePointers.size === 2) {
+                const pts = [...activePointers.values()];
+                const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+                if (pinchStartDist > 0) {
+                    const newZoom = pinchStartZoom * (dist / pinchStartDist);
+                    image.zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, newZoom));
+                    image.cropCx = clampCrop(image.cropCx, image, true);
+                    image.cropCy = clampCrop(image.cropCy, image, false);
+                    renderPreview();
+                }
+                return;
+            }
 
-            const out = getOutputSize();
-            const bw = image.bitmap.width;
-            const bh = image.bitmap.height;
-            const baseScale = Math.max(out.w / bw, out.h / bh);
-            const dispScale = (previewCanvas.width / (previewCanvas._dpr || 1)) / out.w;
+            // Drag — single pointer
+            if (isDragging && activePointers.size === 1) {
+                const dx = e.clientX - dragStartX;
+                const dy = e.clientY - dragStartY;
 
-            const deltaCx = -dx / (bw * baseScale * dispScale);
-            const deltaCy = -dy / (bh * baseScale * dispScale);
+                const out = getOutputSize();
+                const bw = image.bitmap.width;
+                const bh = image.bitmap.height;
+                const baseScale = Math.max(out.w / bw, out.h / bh);
+                const scale = baseScale * (image.zoom || 1);
+                const dispScale = (previewCanvas.width / (previewCanvas._dpr || 1)) / out.w;
 
-            image.cropCx = clampCrop(dragStartCx + deltaCx, image, true);
-            image.cropCy = clampCrop(dragStartCy + deltaCy, image, false);
-            renderPreview();
+                const deltaCx = -dx / (bw * scale * dispScale);
+                const deltaCy = -dy / (bh * scale * dispScale);
+
+                image.cropCx = clampCrop(dragStartCx + deltaCx, image, true);
+                image.cropCy = clampCrop(dragStartCy + deltaCy, image, false);
+                renderPreview();
+            }
         });
 
-        const endDrag = (e) => {
-            if (e.pointerId !== activePointerId) return;
-            activePointerId = null;
-            isDragging = false;
-            editorPreview.classList.remove('dragging');
+        const endPointer = (e) => {
+            activePointers.delete(e.pointerId);
+            if (activePointers.size < 2) pinchStartDist = 0;
+
+            // Pinch → 1-pointer drag transition: re-anchor remaining pointer
+            if (activePointers.size === 1 && editingId !== null) {
+                const remaining = [...activePointers.values()][0];
+                dragStartX = remaining.x;
+                dragStartY = remaining.y;
+                const image = images.find(i => i.id === editingId);
+                if (image) {
+                    dragStartCx = image.cropCx;
+                    dragStartCy = image.cropCy;
+                    isDragging = true;
+                    editorPreview.classList.add('dragging');
+                }
+            }
+
+            if (activePointers.size === 0) {
+                isDragging = false;
+                editorPreview.classList.remove('dragging');
+            }
             try { editorPreview.releasePointerCapture(e.pointerId); } catch (_) { }
         };
 
-        editorPreview.addEventListener('pointerup', endDrag);
-        editorPreview.addEventListener('pointercancel', endDrag);
+        editorPreview.addEventListener('pointerup', endPointer);
+        editorPreview.addEventListener('pointercancel', endPointer);
+
+        // Wheel zoom (PC convenience)
+        editorPreview.addEventListener('wheel', (e) => {
+            if (editingId === null) return;
+            e.preventDefault();
+            const image = images.find(i => i.id === editingId);
+            if (!image) return;
+            const delta = e.deltaY > 0 ? -0.1 : 0.1;
+            image.zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, (image.zoom || 1) + delta));
+            image.cropCx = clampCrop(image.cropCx, image, true);
+            image.cropCy = clampCrop(image.cropCy, image, false);
+            renderPreview();
+        }, { passive: false });
     }
 
     // ---- Bind events ----
@@ -709,10 +778,11 @@
                 document.querySelectorAll('.aspect-tab').forEach(t => t.classList.remove('active'));
                 tab.classList.add('active');
 
-                // Reset crop center for all images (aspect change → meaning changes)
+                // Reset crop + zoom for all images (aspect change → meaning changes)
                 images.forEach(img => {
                     img.cropCx = 0.5;
                     img.cropCy = 0.5;
+                    img.zoom = 1.0;
                 });
 
                 if (editingId !== null) {
