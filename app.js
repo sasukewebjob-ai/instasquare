@@ -218,25 +218,60 @@
     }
 
     // ---- Preview sizing ----
+    // Compute available height = viewport - all other visible UI elements
+    function computeAvailableHeight() {
+        const header = document.querySelector('.header');
+        const tabs = document.querySelector('.aspect-tabs');
+        const strip = document.querySelector('.thumb-strip-wrap');
+        const filters = document.querySelector('.editor-filters');
+        const actions = document.querySelector('.editor-actions');
+        const previewWrap = editorPreview.parentElement;
+
+        let used = 0;
+        [header, tabs, strip, filters, actions].forEach(el => {
+            if (el && el.offsetParent !== null) used += el.offsetHeight;
+        });
+
+        // editor-preview-wrap padding (top + bottom)
+        const wrapStyle = window.getComputedStyle(previewWrap);
+        used += parseFloat(wrapStyle.paddingTop) + parseFloat(wrapStyle.paddingBottom);
+
+        // container gaps (~6 gaps of 8px) + paddings + safe areas (estimate)
+        used += 56;
+
+        const vh = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
+        return Math.max(140, vh - used);
+    }
+
     function resizePreview() {
         const out = getOutputSize();
         const ratio = out.w / out.h;
 
         const parent = editorPreview.parentElement;
-        const parentWidth = parent.clientWidth - 24;
+        const parentStyle = window.getComputedStyle(parent);
+        const parentInnerWidth = parent.clientWidth
+            - parseFloat(parentStyle.paddingLeft)
+            - parseFloat(parentStyle.paddingRight);
+
+        const availableH = computeAvailableHeight();
 
         let pvW, pvH;
         if (ratio >= 1) {
-            pvW = Math.min(parentWidth, PREVIEW_MAX_W);
+            // 1:1 — width-bound or height-bound, whichever smaller
+            pvW = Math.min(parentInnerWidth, availableH * ratio, PREVIEW_MAX_W);
             pvH = pvW / ratio;
         } else {
-            pvH = Math.min(PREVIEW_MAX_H, window.innerHeight * 0.55);
+            // 9:16 — height-driven, with width fallback
+            pvH = Math.min(availableH, PREVIEW_MAX_H);
             pvW = pvH * ratio;
-            if (pvW > parentWidth) {
-                pvW = parentWidth;
+            if (pvW > parentInnerWidth) {
+                pvW = parentInnerWidth;
                 pvH = pvW / ratio;
             }
         }
+
+        pvW = Math.max(80, pvW);
+        pvH = Math.max(80, pvH);
 
         const dpr = window.devicePixelRatio || 1;
         previewCanvas._dpr = dpr;
@@ -755,9 +790,9 @@
         removeOneBtn.addEventListener('click', removeCurrent);
         clearAllBtn.addEventListener('click', clearAll);
 
-        // Resize
+        // Resize - both window and visualViewport (iOS address bar)
         let resizeTimer = null;
-        window.addEventListener('resize', () => {
+        const onResize = () => {
             if (resizeTimer) clearTimeout(resizeTimer);
             resizeTimer = setTimeout(() => {
                 if (editingId !== null) {
@@ -765,7 +800,12 @@
                     renderPreview();
                 }
             }, 100);
-        });
+        };
+        window.addEventListener('resize', onResize);
+        window.addEventListener('orientationchange', onResize);
+        if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', onResize);
+        }
 
         attachDragHandlers();
     }
