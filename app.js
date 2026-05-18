@@ -1,5 +1,5 @@
 /* ============================================
-   InstaSquare - Multi-aspect Photo Editor
+   InstaSquare - Simple
    ============================================ */
 
 (function () {
@@ -10,20 +10,8 @@
     const JPEG_QUALITY = 0.92;
     const PREVIEW_MAX_W = 540;
     const PREVIEW_MAX_H = 600;
-    const ZOOM_MIN = 1.0;
-    const ZOOM_MAX = 4.0;
 
-    const PRESETS = {
-        none: [],
-        vivid: ['brightness(1.05)', 'contrast(1.10)', 'saturate(1.25)'],
-        mute: ['brightness(0.98)', 'contrast(1.05)', 'saturate(0.80)', 'sepia(0.10)'],
-        film: ['brightness(1.02)', 'contrast(1.08)', 'saturate(1.10)', 'sepia(0.15)'],
-        mono: ['saturate(0)', 'contrast(1.08)'],
-        warm: ['brightness(1.03)', 'saturate(1.10)', 'sepia(0.20)', 'hue-rotate(-10deg)'],
-        cool: ['brightness(1.02)', 'saturate(1.05)', 'hue-rotate(15deg)']
-    };
-
-    // ---- DOM helpers ----
+    // ---- DOM ----
     const $ = (id) => document.getElementById(id);
 
     const uploadArea = $('uploadArea');
@@ -31,37 +19,24 @@
     const uploadSection = $('uploadSection');
     const uploadCount = $('uploadCount');
     const countText = $('countText');
+
     const editorSection = $('editorSection');
     const thumbStrip = $('thumbStrip');
-    const addMoreBtnTop = $('addMoreBtnTop');
+    const addMoreBtn = $('addMoreBtn');
 
     const editorPreview = $('editorPreview');
     const previewCanvas = $('previewCanvas');
     const previewCtx = previewCanvas.getContext('2d');
-    const beforeBadge = $('beforeBadge');
     const previewMeta = $('previewMeta');
-
-    const zoomRange = $('zoomRange');
-    const zoomValueEl = $('zoomValue');
-    const rotateBtn = $('rotateBtn');
-    const flipBtn = $('flipBtn');
-    const autoBtn = $('autoBtn');
-    const resetBtn = $('resetBtn');
-    const beforeToggleBtn = $('beforeToggleBtn');
-    const removeOneBtn = $('removeOneBtn');
 
     const blurRange = $('blurRange');
     const blurValueEl = $('blurValue');
     const brightnessRange = $('brightnessRange');
     const brightnessValueEl = $('brightnessValue');
-    const contrastRange = $('contrastRange');
-    const contrastValueEl = $('contrastValue');
-    const saturationRange = $('saturationRange');
-    const saturationValueEl = $('saturationValue');
 
-    const filenamePrefixInput = $('filenamePrefix');
-    const downloadSingleBtn = $('downloadSingleBtn');
-    const downloadAllBtn = $('downloadAllBtn');
+    const downloadBtn = $('downloadBtn');
+    const resetBtn = $('resetBtn');
+    const removeOneBtn = $('removeOneBtn');
     const clearAllBtn = $('clearAllBtn');
 
     const processingSection = $('processingSection');
@@ -75,25 +50,14 @@
     let images = [];
     let editingId = null;
     let nextId = 1;
-    let beforeMode = false;
     let faceDetector = null;
     let faceDetectionSupported = false;
 
-    const global = {
-        blur: 0,
-        brightness: 0,
-        contrast: 0,
-        saturation: 0,
-        preset: 'none'
-    };
-
-    // Pointer / drag state
-    const activePointers = new Map();
+    // Pointer / drag
     let isDragging = false;
     let dragStartX = 0, dragStartY = 0;
     let dragStartCx = 0.5, dragStartCy = 0.5;
-    let pinchStartDist = 0;
-    let pinchStartZoom = 1;
+    let activePointerId = null;
 
     // ---- Init ----
     initFaceDetection();
@@ -110,10 +74,8 @@
         }
     }
 
-    // ---- Output size ----
     function getOutputSize() {
-        if (aspectRatio === '1:1') return { w: 1080, h: 1080 };
-        return { w: 1080, h: 1920 };
+        return aspectRatio === '1:1' ? { w: 1080, h: 1080 } : { w: 1080, h: 1920 };
     }
 
     // ---- Image load with EXIF orientation ----
@@ -121,7 +83,6 @@
         try {
             return await createImageBitmap(file, { imageOrientation: 'from-image' });
         } catch (e) {
-            // Fallback: HTMLImageElement (modern browsers also auto-apply EXIF)
             return await new Promise((resolve, reject) => {
                 const img = new Image();
                 img.onload = () => resolve(img);
@@ -131,7 +92,7 @@
         }
     }
 
-    // ---- Make thumbnail (square center crop) ----
+    // ---- Thumbnail (square center crop) ----
     function makeThumb(bitmap) {
         const size = 128;
         const c = document.createElement('canvas');
@@ -147,7 +108,7 @@
         return c.toDataURL('image/jpeg', 0.75);
     }
 
-    // ---- Auto crop suggestion ----
+    // ---- Auto crop center suggestion (face → saliency → center) ----
     async function autoSuggestCrop(bitmap) {
         const w = bitmap.width;
         const h = bitmap.height;
@@ -166,14 +127,13 @@
                     }
                     const cx = ((minX + maxX) / 2) / w;
                     let cy = ((minY + maxY) / 2) / h;
-                    cy = Math.max(0, cy - 0.04); // slightly above face center
-                    return { cx, cy, faceDetected: true };
+                    cy = Math.max(0, cy - 0.04);
+                    return { cx, cy };
                 }
             } catch (e) {
-                console.warn('Face detection failed, falling back:', e);
+                console.warn('Face detection failed:', e);
             }
         }
-
         return saliencyFallback(bitmap, w, h);
     }
 
@@ -187,13 +147,12 @@
         const cx = procCanvas.getContext('2d', { willReadFrequently: true });
         cx.drawImage(bitmap, 0, 0, aW, aH);
 
-        let imageData;
+        let data;
         try {
-            imageData = cx.getImageData(0, 0, aW, aH);
+            data = cx.getImageData(0, 0, aW, aH).data;
         } catch (e) {
-            return { cx: 0.5, cy: 0.5, faceDetected: false };
+            return { cx: 0.5, cy: 0.5 };
         }
-        const data = imageData.data;
 
         let total = 0, wx = 0, wy = 0;
         for (let y = 0; y < aH; y++) {
@@ -220,12 +179,8 @@
             }
         }
 
-        if (total <= 0) return { cx: 0.5, cy: 0.5, faceDetected: false };
-        return {
-            cx: (wx / total) / aW,
-            cy: (wy / total) / aH,
-            faceDetected: false
-        };
+        if (total <= 0) return { cx: 0.5, cy: 0.5 };
+        return { cx: (wx / total) / aW, cy: (wy / total) / aH };
     }
 
     function isSkinTone(r, g, b) {
@@ -240,23 +195,21 @@
         return false;
     }
 
-    // ---- Clamp crop so the image fully covers the output frame ----
+    // ---- Clamp crop so image fully covers frame ----
     function clampCrop(value, image, isX) {
         const out = getOutputSize();
-        const isSideways = image.rotation === 90 || image.rotation === 270;
-        const dispImgW = isSideways ? image.bitmap.height : image.bitmap.width;
-        const dispImgH = isSideways ? image.bitmap.width : image.bitmap.height;
-        const baseScale = Math.max(out.w / dispImgW, out.h / dispImgH);
-        const scale = baseScale * image.zoom;
+        const bw = image.bitmap.width;
+        const bh = image.bitmap.height;
+        const baseScale = Math.max(out.w / bw, out.h / bh);
 
         if (isX) {
-            const half = (out.w / 2) / (dispImgW * scale);
+            const half = (out.w / 2) / (bw * baseScale);
             const minV = half;
             const maxV = 1 - half;
             if (maxV <= minV) return 0.5;
             return Math.max(minV, Math.min(maxV, value));
         } else {
-            const half = (out.h / 2) / (dispImgH * scale);
+            const half = (out.h / 2) / (bh * baseScale);
             const minV = half;
             const maxV = 1 - half;
             if (maxV <= minV) return 0.5;
@@ -270,17 +223,14 @@
         const ratio = out.w / out.h;
 
         const parent = editorPreview.parentElement;
-        const parentWidth = parent.clientWidth - 32; // padding
+        const parentWidth = parent.clientWidth - 24;
 
         let pvW, pvH;
-
         if (ratio >= 1) {
-            // 1:1
             pvW = Math.min(parentWidth, PREVIEW_MAX_W);
             pvH = pvW / ratio;
         } else {
-            // 9:16 (tall)
-            pvH = Math.min(PREVIEW_MAX_H, window.innerHeight * 0.62);
+            pvH = Math.min(PREVIEW_MAX_H, window.innerHeight * 0.55);
             pvW = pvH * ratio;
             if (pvW > parentWidth) {
                 pvW = parentWidth;
@@ -290,49 +240,43 @@
 
         const dpr = window.devicePixelRatio || 1;
         previewCanvas._dpr = dpr;
-
         previewCanvas.width = Math.round(pvW * dpr);
         previewCanvas.height = Math.round(pvH * dpr);
         previewCanvas.style.width = `${pvW}px`;
         previewCanvas.style.height = `${pvH}px`;
-
         editorPreview.style.width = `${pvW}px`;
         editorPreview.style.height = `${pvH}px`;
     }
 
-    // ---- Draw image with crop/rotate/flip into target ctx ----
-    function drawImageWithCropRotate(targetCtx, image, outW, outH, dispW, dispH) {
+    // ---- Draw image with crop into target ctx ----
+    function drawImageWithCrop(targetCtx, image, outW, outH, dispW, dispH) {
         const dispScale = dispW / outW;
-
-        const isSideways = image.rotation === 90 || image.rotation === 270;
         const bw = image.bitmap.width;
         const bh = image.bitmap.height;
-        const dispImgW = isSideways ? bh : bw;
-        const dispImgH = isSideways ? bw : bh;
+        const baseScale = Math.max(outW / bw, outH / bh);
 
-        const baseScale = Math.max(outW / dispImgW, outH / dispImgH);
-        const scale = baseScale * image.zoom;
-
-        const centerOutX = outW / 2 - (image.cropCx - 0.5) * dispImgW * scale;
-        const centerOutY = outH / 2 - (image.cropCy - 0.5) * dispImgH * scale;
+        const centerOutX = outW / 2 - (image.cropCx - 0.5) * bw * baseScale;
+        const centerOutY = outH / 2 - (image.cropCy - 0.5) * bh * baseScale;
 
         const centerDispX = centerOutX * dispScale;
         const centerDispY = centerOutY * dispScale;
-
-        const drawWDisp = bw * scale * dispScale;
-        const drawHDisp = bh * scale * dispScale;
+        const drawW = bw * baseScale * dispScale;
+        const drawH = bh * baseScale * dispScale;
 
         targetCtx.save();
-        targetCtx.translate(centerDispX, centerDispY);
-        if (image.rotation) targetCtx.rotate(image.rotation * Math.PI / 180);
-        if (image.flipH) targetCtx.scale(-1, 1);
         targetCtx.imageSmoothingEnabled = true;
         targetCtx.imageSmoothingQuality = 'high';
-        targetCtx.drawImage(image.bitmap, -drawWDisp / 2, -drawHDisp / 2, drawWDisp, drawHDisp);
+        targetCtx.drawImage(
+            image.bitmap,
+            centerDispX - drawW / 2,
+            centerDispY - drawH / 2,
+            drawW,
+            drawH
+        );
         targetCtx.restore();
     }
 
-    // ---- Render preview (canvas) ----
+    // ---- Render preview ----
     function renderPreview() {
         if (editingId === null) return;
         const image = images.find(i => i.id === editingId);
@@ -340,72 +284,39 @@
 
         const cw = previewCanvas.width;
         const ch = previewCanvas.height;
-
         previewCtx.clearRect(0, 0, cw, ch);
         previewCtx.fillStyle = '#000';
         previewCtx.fillRect(0, 0, cw, ch);
 
-        if (beforeMode) {
-            const bw = image.bitmap.width;
-            const bh = image.bitmap.height;
-            const sc = Math.min(cw / bw, ch / bh);
-            const dw = bw * sc;
-            const dh = bh * sc;
-            const dx = (cw - dw) / 2;
-            const dy = (ch - dh) / 2;
-            previewCtx.imageSmoothingEnabled = true;
-            previewCtx.imageSmoothingQuality = 'high';
-            previewCtx.drawImage(image.bitmap, dx, dy, dw, dh);
-            return;
-        }
-
         const out = getOutputSize();
-        drawImageWithCropRotate(previewCtx, image, out.w, out.h, cw, ch);
+        drawImageWithCrop(previewCtx, image, out.w, out.h, cw, ch);
     }
 
-    // ---- Filter strings ----
-    function buildPreviewFilterString() {
-        const filters = [];
-        const preset = PRESETS[global.preset];
-        if (preset && preset.length) filters.push(...preset);
-        if (global.blur > 0) filters.push(`blur(${global.blur}px)`);
-        if (global.brightness !== 0) filters.push(`brightness(${1 + global.brightness / 200})`);
-        if (global.contrast !== 0) filters.push(`contrast(${1 + global.contrast / 200})`);
-        if (global.saturation !== 0) filters.push(`saturate(${Math.max(0, 1 + global.saturation / 100)})`);
-        return filters.join(' ') || 'none';
-    }
-
-    function buildColorFilterString() {
-        const filters = [];
-        const preset = PRESETS[global.preset];
-        if (preset && preset.length) filters.push(...preset);
-        if (global.brightness !== 0) filters.push(`brightness(${1 + global.brightness / 200})`);
-        if (global.contrast !== 0) filters.push(`contrast(${1 + global.contrast / 200})`);
-        if (global.saturation !== 0) filters.push(`saturate(${Math.max(0, 1 + global.saturation / 100)})`);
-        return filters.length ? filters.join(' ') : 'none';
-    }
-
-    function hasColorFilter() {
-        return global.preset !== 'none' || global.brightness !== 0 || global.contrast !== 0 || global.saturation !== 0;
+    // ---- CSS filter for preview (live) ----
+    function previewFilterString(image) {
+        const parts = [];
+        if (image.blur > 0) parts.push(`blur(${image.blur}px)`);
+        if (image.brightness !== 0) parts.push(`brightness(${1 + image.brightness / 200})`);
+        return parts.join(' ') || 'none';
     }
 
     function updatePreviewFilter() {
-        if (beforeMode) {
-            previewCanvas.style.filter = 'none';
-        } else {
-            previewCanvas.style.filter = buildPreviewFilterString();
-        }
+        if (editingId === null) return;
+        const image = images.find(i => i.id === editingId);
+        if (!image) return;
+        previewCanvas.style.filter = previewFilterString(image);
     }
 
-    // ---- Downscale blur (artifact-free, rectangle-friendly) ----
+    // ---- Downscale blur for output (artifact-free) ----
     function applyDownscaleBlur(canvas, amount) {
         if (amount <= 0) return;
         const ctx = canvas.getContext('2d');
         const finalW = canvas.width;
         const finalH = canvas.height;
 
-        const passes = Math.min(Math.ceil(amount / 5), 20);
-        const scaleFactor = Math.max(0.01, 1 - (amount / 120));
+        // amount is 0..20; map to passes/scaleFactor similar to before
+        const passes = Math.min(Math.max(1, Math.ceil(amount / 2)), 10);
+        const scaleFactor = Math.max(0.05, 1 - (amount / 25));
 
         const temp = document.createElement('canvas');
         const tctx = temp.getContext('2d');
@@ -413,7 +324,6 @@
         for (let i = 0; i < passes; i++) {
             const smallW = Math.max(2, Math.round(finalW * scaleFactor));
             const smallH = Math.max(2, Math.round(finalH * scaleFactor));
-
             temp.width = smallW;
             temp.height = smallH;
             tctx.imageSmoothingEnabled = true;
@@ -427,7 +337,7 @@
         }
     }
 
-    // ---- Process for output (final render) ----
+    // ---- Process for output ----
     async function processForOutput(image) {
         const out = getOutputSize();
         const outCanvas = document.createElement('canvas');
@@ -438,23 +348,20 @@
         oc.fillStyle = '#000';
         oc.fillRect(0, 0, out.w, out.h);
 
-        drawImageWithCropRotate(oc, image, out.w, out.h, out.w, out.h);
+        drawImageWithCrop(oc, image, out.w, out.h, out.w, out.h);
 
-        // Step 1: Blur (downscale method)
-        if (global.blur > 0) {
-            applyDownscaleBlur(outCanvas, global.blur);
+        if (image.blur > 0) {
+            applyDownscaleBlur(outCanvas, image.blur);
         }
 
-        // Step 2: Color filters via ctx.filter on a copy
-        if (hasColorFilter()) {
+        if (image.brightness !== 0) {
             const temp = document.createElement('canvas');
             temp.width = out.w;
             temp.height = out.h;
             const tc = temp.getContext('2d');
-            tc.filter = buildColorFilterString();
+            tc.filter = `brightness(${1 + image.brightness / 200})`;
             tc.drawImage(outCanvas, 0, 0);
             tc.filter = 'none';
-
             oc.clearRect(0, 0, out.w, out.h);
             oc.drawImage(temp, 0, 0);
         }
@@ -475,28 +382,17 @@
             div.className = 'thumb-item' + (img.id === editingId ? ' active' : '');
             div.dataset.id = img.id;
             div.innerHTML = `
-                <img src="${img.thumbDataUrl}" alt="${escapeHtml(img.name)}">
+                <img src="${img.thumbDataUrl}" alt="">
                 <span class="thumb-index">${idx + 1}</span>
-                ${img.faceDetected ? '<span class="thumb-face">👤</span>' : ''}
             `;
             div.addEventListener('click', () => setEditingImage(img.id));
             thumbStrip.appendChild(div);
         });
     }
 
-    function escapeHtml(s) {
-        return String(s).replace(/[&<>"']/g, (c) => ({
-            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-        }[c]));
-    }
-
     // ---- Set editing image ----
     function setEditingImage(id) {
         editingId = id;
-        beforeMode = false;
-        beforeToggleBtn.classList.remove('active');
-        beforeBadge.style.display = 'none';
-
         document.querySelectorAll('.thumb-item').forEach(el => {
             el.classList.toggle('active', parseInt(el.dataset.id, 10) === id);
         });
@@ -504,12 +400,18 @@
         const image = images.find(i => i.id === id);
         if (!image) return;
 
-        zoomRange.value = Math.round(image.zoom * 100);
-        zoomValueEl.textContent = `${image.zoom.toFixed(1)}x`;
+        // Sync sliders to this image's values
+        blurRange.value = image.blur;
+        blurValueEl.textContent = `${image.blur}`;
+        brightnessRange.value = image.brightness;
+        brightnessValueEl.textContent = image.brightness >= 0 ? `+${image.brightness}` : `${image.brightness}`;
 
         previewMeta.textContent = `${image.name} (${image.bitmap.width}×${image.bitmap.height})`;
 
         resizePreview();
+        // Clamp crop in case aspect changed
+        image.cropCx = clampCrop(image.cropCx, image, true);
+        image.cropCy = clampCrop(image.cropCy, image, false);
         updatePreviewFilter();
         renderPreview();
     }
@@ -518,7 +420,7 @@
     async function handleFiles(files) {
         const remaining = MAX_FILES - images.length;
         if (remaining <= 0) {
-            showToast(`最大${MAX_FILES}枚までアップロードできます`);
+            showToast(`最大${MAX_FILES}枚までです`);
             return;
         }
         const valid = files
@@ -530,7 +432,7 @@
             return;
         }
         if (files.length > remaining) {
-            showToast(`残り${remaining}枚までアップロード可能。最初の${valid.length}枚を処理します`);
+            showToast(`残り${remaining}枚まで。最初の${valid.length}枚を処理します`);
         }
 
         processingSection.style.display = 'block';
@@ -538,7 +440,7 @@
 
         for (let i = 0; i < valid.length; i++) {
             const f = valid[i];
-            processingText.textContent = `画像を読み込み中... (${i + 1}/${valid.length})`;
+            processingText.textContent = `読み込み中... (${i + 1}/${valid.length})`;
             progressFill.style.width = `${(i / valid.length) * 100}%`;
 
             try {
@@ -553,26 +455,21 @@
                     thumbDataUrl: thumb,
                     cropCx: suggested.cx,
                     cropCy: suggested.cy,
-                    zoom: 1.0,
-                    rotation: 0,
-                    flipH: false,
                     autoSuggested: { cx: suggested.cx, cy: suggested.cy },
-                    faceDetected: suggested.faceDetected
+                    blur: 0,
+                    brightness: 0
                 };
 
-                // Clamp initial crop based on aspect
                 imageObj.cropCx = clampCrop(imageObj.cropCx, imageObj, true);
                 imageObj.cropCy = clampCrop(imageObj.cropCy, imageObj, false);
 
                 images.push(imageObj);
             } catch (err) {
-                console.error('Image load failed:', err);
-                showToast(`「${f.name}」の読み込みに失敗しました`);
+                console.error('Load failed:', err);
+                showToast(`「${f.name}」の読み込みに失敗`);
             }
 
             progressFill.style.width = `${((i + 1) / valid.length) * 100}%`;
-
-            // Yield to UI
             await new Promise(r => setTimeout(r, 0));
         }
 
@@ -595,19 +492,19 @@
     function updateUploadCount() {
         if (images.length > 0) {
             uploadCount.style.display = 'block';
-            countText.textContent = `${images.length} / ${MAX_FILES} 枚アップロード済み`;
+            countText.textContent = `${images.length} / ${MAX_FILES} 枚`;
         } else {
             uploadCount.style.display = 'none';
         }
     }
 
-    // ---- Download single ----
-    async function downloadSingleCurrent() {
+    // ---- Download current ----
+    async function downloadCurrent() {
         if (editingId === null) return;
         const image = images.find(i => i.id === editingId);
         if (!image) return;
 
-        downloadSingleBtn.disabled = true;
+        downloadBtn.disabled = true;
         try {
             const blob = await processForOutput(image);
             const aspectTag = aspectRatio === '1:1' ? '1x1' : '9x16';
@@ -616,9 +513,9 @@
             showToast('ダウンロードしました');
         } catch (err) {
             console.error(err);
-            showToast('ダウンロードに失敗しました');
+            showToast('ダウンロードに失敗');
         } finally {
-            downloadSingleBtn.disabled = false;
+            downloadBtn.disabled = false;
         }
     }
 
@@ -630,81 +527,32 @@
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
-        // Revoke later to ensure download starts
         setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
 
-    // ---- Download all as ZIP ----
-    async function downloadAllAsZip() {
-        if (images.length === 0) return;
-        if (typeof JSZip === 'undefined') {
-            showToast('ZIPライブラリの読み込みに失敗しました');
-            return;
-        }
+    // ---- Reset current ----
+    function resetCurrent() {
+        if (editingId === null) return;
+        const image = images.find(i => i.id === editingId);
+        if (!image) return;
+        image.blur = 0;
+        image.brightness = 0;
+        image.cropCx = image.autoSuggested.cx;
+        image.cropCy = image.autoSuggested.cy;
+        image.cropCx = clampCrop(image.cropCx, image, true);
+        image.cropCy = clampCrop(image.cropCy, image, false);
 
-        downloadAllBtn.disabled = true;
-        const originalHtml = downloadAllBtn.innerHTML;
-        downloadAllBtn.textContent = 'ZIP作成中...';
+        blurRange.value = 0;
+        blurValueEl.textContent = '0';
+        brightnessRange.value = 0;
+        brightnessValueEl.textContent = '±0';
 
-        processingSection.style.display = 'block';
-        progressFill.style.width = '0%';
-
-        try {
-            const zip = new JSZip();
-            const folder = zip.folder('InstaSquare');
-
-            const rawPrefix = filenamePrefixInput.value.trim();
-            const prefix = sanitizeFilename(rawPrefix) || 'insta';
-            const padLen = Math.max(2, String(images.length).length);
-            const aspectTag = aspectRatio === '1:1' ? '1x1' : '9x16';
-
-            for (let i = 0; i < images.length; i++) {
-                processingText.textContent = `加工中... (${i + 1}/${images.length})`;
-                progressFill.style.width = `${(i / images.length) * 100}%`;
-                const blob = await processForOutput(images[i]);
-                const num = String(i + 1).padStart(padLen, '0');
-                const fname = `${prefix}_${num}_${aspectTag}.jpg`;
-                folder.file(fname, blob);
-                await new Promise(r => setTimeout(r, 0));
-            }
-
-            processingText.textContent = 'ZIP生成中...';
-            const content = await zip.generateAsync({ type: 'blob' });
-            triggerDownload(content, `${prefix}_${aspectTag}.zip`);
-
-            showToast(`${images.length}枚をZIPでダウンロードしました`);
-        } catch (err) {
-            console.error('ZIP creation failed:', err);
-            showToast('ZIPの作成に失敗しました');
-        } finally {
-            downloadAllBtn.disabled = false;
-            downloadAllBtn.innerHTML = originalHtml;
-            processingSection.style.display = 'none';
-        }
+        updatePreviewFilter();
+        renderPreview();
+        showToast('この画像をリセットしました');
     }
 
-    function sanitizeFilename(s) {
-        return s.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, '_').slice(0, 60);
-    }
-
-    // ---- Clear all ----
-    function clearAll() {
-        if (!confirm('すべての画像をクリアしますか？')) return;
-        images.forEach(img => {
-            if (img.bitmap && typeof img.bitmap.close === 'function') {
-                try { img.bitmap.close(); } catch (_) { }
-            }
-        });
-        images = [];
-        editingId = null;
-        editorSection.style.display = 'none';
-        uploadSection.style.display = 'block';
-        thumbStrip.innerHTML = '';
-        updateUploadCount();
-        showToast('すべてクリアしました');
-    }
-
-    // ---- Remove current image ----
+    // ---- Remove current ----
     function removeCurrent() {
         if (editingId === null) return;
         const idx = images.findIndex(i => i.id === editingId);
@@ -731,6 +579,23 @@
         updateUploadCount();
     }
 
+    // ---- Clear all ----
+    function clearAll() {
+        if (!confirm('すべての画像をクリアしますか？')) return;
+        images.forEach(img => {
+            if (img.bitmap && typeof img.bitmap.close === 'function') {
+                try { img.bitmap.close(); } catch (_) { }
+            }
+        });
+        images = [];
+        editingId = null;
+        editorSection.style.display = 'none';
+        uploadSection.style.display = 'block';
+        thumbStrip.innerHTML = '';
+        updateUploadCount();
+        showToast('すべてクリアしました');
+    }
+
     // ---- Toast ----
     function showToast(msg) {
         const existing = document.querySelector('.toast');
@@ -746,117 +611,56 @@
         }, 3000);
     }
 
-    // ---- Pointer / drag / pinch ----
-    function attachPointerHandlers() {
+    // ---- Drag handlers ----
+    function attachDragHandlers() {
         editorPreview.addEventListener('pointerdown', (e) => {
-            if (beforeMode || editingId === null) return;
-            activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-
-            if (activePointers.size === 1) {
-                isDragging = true;
-                editorPreview.classList.add('dragging');
-                try { editorPreview.setPointerCapture(e.pointerId); } catch (_) { }
-                dragStartX = e.clientX;
-                dragStartY = e.clientY;
-                const image = images.find(i => i.id === editingId);
+            if (editingId === null) return;
+            if (activePointerId !== null) return; // ignore additional pointers
+            activePointerId = e.pointerId;
+            isDragging = true;
+            editorPreview.classList.add('dragging');
+            try { editorPreview.setPointerCapture(e.pointerId); } catch (_) { }
+            dragStartX = e.clientX;
+            dragStartY = e.clientY;
+            const image = images.find(i => i.id === editingId);
+            if (image) {
                 dragStartCx = image.cropCx;
                 dragStartCy = image.cropCy;
-            } else if (activePointers.size === 2) {
-                isDragging = false;
-                editorPreview.classList.remove('dragging');
-                const pts = [...activePointers.values()];
-                pinchStartDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
-                const image = images.find(i => i.id === editingId);
-                pinchStartZoom = image.zoom;
             }
         });
 
         editorPreview.addEventListener('pointermove', (e) => {
-            if (!activePointers.has(e.pointerId)) return;
-            activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-
-            if (editingId === null) return;
+            if (!isDragging || e.pointerId !== activePointerId || editingId === null) return;
             const image = images.find(i => i.id === editingId);
             if (!image) return;
 
-            if (activePointers.size === 2) {
-                const pts = [...activePointers.values()];
-                const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
-                if (pinchStartDist > 0) {
-                    image.zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, pinchStartZoom * (dist / pinchStartDist)));
-                    zoomRange.value = Math.round(image.zoom * 100);
-                    zoomValueEl.textContent = `${image.zoom.toFixed(1)}x`;
-                    image.cropCx = clampCrop(image.cropCx, image, true);
-                    image.cropCy = clampCrop(image.cropCy, image, false);
-                    renderPreview();
-                }
-                return;
-            }
+            const dx = e.clientX - dragStartX;
+            const dy = e.clientY - dragStartY;
 
-            if (isDragging && activePointers.size === 1) {
-                const dx = e.clientX - dragStartX;
-                const dy = e.clientY - dragStartY;
+            const out = getOutputSize();
+            const bw = image.bitmap.width;
+            const bh = image.bitmap.height;
+            const baseScale = Math.max(out.w / bw, out.h / bh);
+            const dispScale = (previewCanvas.width / (previewCanvas._dpr || 1)) / out.w;
 
-                const out = getOutputSize();
-                const isSideways = image.rotation === 90 || image.rotation === 270;
-                const dispImgW = isSideways ? image.bitmap.height : image.bitmap.width;
-                const dispImgH = isSideways ? image.bitmap.width : image.bitmap.height;
-                const baseScale = Math.max(out.w / dispImgW, out.h / dispImgH);
-                const scale = baseScale * image.zoom;
+            const deltaCx = -dx / (bw * baseScale * dispScale);
+            const deltaCy = -dy / (bh * baseScale * dispScale);
 
-                const dispScale = (previewCanvas.width / (previewCanvas._dpr || 1)) / out.w;
-
-                const deltaCx = -dx / (dispImgW * scale * dispScale);
-                const deltaCy = -dy / (dispImgH * scale * dispScale);
-
-                image.cropCx = clampCrop(dragStartCx + deltaCx, image, true);
-                image.cropCy = clampCrop(dragStartCy + deltaCy, image, false);
-                renderPreview();
-            }
+            image.cropCx = clampCrop(dragStartCx + deltaCx, image, true);
+            image.cropCy = clampCrop(dragStartCy + deltaCy, image, false);
+            renderPreview();
         });
 
-        const endPointer = (e) => {
-            activePointers.delete(e.pointerId);
-            if (activePointers.size < 2) pinchStartDist = 0;
-
-            if (activePointers.size === 1 && editingId !== null) {
-                // Transition from pinch back to drag: re-anchor the remaining pointer
-                const remaining = [...activePointers.values()][0];
-                dragStartX = remaining.x;
-                dragStartY = remaining.y;
-                const image = images.find(i => i.id === editingId);
-                if (image) {
-                    dragStartCx = image.cropCx;
-                    dragStartCy = image.cropCy;
-                    isDragging = true;
-                    editorPreview.classList.add('dragging');
-                }
-            }
-
-            if (activePointers.size === 0) {
-                isDragging = false;
-                editorPreview.classList.remove('dragging');
-            }
+        const endDrag = (e) => {
+            if (e.pointerId !== activePointerId) return;
+            activePointerId = null;
+            isDragging = false;
+            editorPreview.classList.remove('dragging');
             try { editorPreview.releasePointerCapture(e.pointerId); } catch (_) { }
         };
 
-        editorPreview.addEventListener('pointerup', endPointer);
-        editorPreview.addEventListener('pointercancel', endPointer);
-
-        // Wheel zoom
-        editorPreview.addEventListener('wheel', (e) => {
-            if (beforeMode || editingId === null) return;
-            e.preventDefault();
-            const image = images.find(i => i.id === editingId);
-            if (!image) return;
-            const delta = e.deltaY > 0 ? -0.1 : 0.1;
-            image.zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, image.zoom + delta));
-            zoomRange.value = Math.round(image.zoom * 100);
-            zoomValueEl.textContent = `${image.zoom.toFixed(1)}x`;
-            image.cropCx = clampCrop(image.cropCx, image, true);
-            image.cropCy = clampCrop(image.cropCy, image, false);
-            renderPreview();
-        }, { passive: false });
+        editorPreview.addEventListener('pointerup', endDrag);
+        editorPreview.addEventListener('pointercancel', endDrag);
     }
 
     // ---- Bind events ----
@@ -870,11 +674,10 @@
                 document.querySelectorAll('.aspect-tab').forEach(t => t.classList.remove('active'));
                 tab.classList.add('active');
 
-                // Reset crop center for all images
+                // Reset crop center for all images (aspect change → meaning changes)
                 images.forEach(img => {
                     img.cropCx = 0.5;
                     img.cropCy = 0.5;
-                    img.zoom = 1.0;
                 });
 
                 if (editingId !== null) {
@@ -889,7 +692,7 @@
         // Upload click
         uploadArea.addEventListener('click', () => {
             if (images.length >= MAX_FILES) {
-                showToast(`最大${MAX_FILES}枚までアップロードできます`);
+                showToast(`最大${MAX_FILES}枚までです`);
                 return;
             }
             fileInput.click();
@@ -918,149 +721,41 @@
             if (files.length > 0) handleFiles(files);
         });
 
-        // Add more (top button in editor)
-        addMoreBtnTop.addEventListener('click', () => {
+        addMoreBtn.addEventListener('click', () => {
             if (images.length >= MAX_FILES) {
-                showToast(`最大${MAX_FILES}枚までアップロードできます`);
+                showToast(`最大${MAX_FILES}枚までです`);
                 return;
             }
             fileInput.click();
         });
 
-        // Zoom slider
-        zoomRange.addEventListener('input', () => {
-            if (editingId === null) return;
-            const image = images.find(i => i.id === editingId);
-            if (!image) return;
-            image.zoom = parseInt(zoomRange.value, 10) / 100;
-            zoomValueEl.textContent = `${image.zoom.toFixed(1)}x`;
-            image.cropCx = clampCrop(image.cropCx, image, true);
-            image.cropCy = clampCrop(image.cropCy, image, false);
-            renderPreview();
-        });
-
-        // Rotate
-        rotateBtn.addEventListener('click', () => {
-            if (editingId === null) return;
-            const image = images.find(i => i.id === editingId);
-            if (!image) return;
-            image.rotation = (image.rotation + 90) % 360;
-            // Rotation changes axis meaning → reset crop center
-            image.cropCx = 0.5;
-            image.cropCy = 0.5;
-            image.cropCx = clampCrop(image.cropCx, image, true);
-            image.cropCy = clampCrop(image.cropCy, image, false);
-            renderPreview();
-        });
-
-        // Flip
-        flipBtn.addEventListener('click', () => {
-            if (editingId === null) return;
-            const image = images.find(i => i.id === editingId);
-            if (!image) return;
-            image.flipH = !image.flipH;
-            image.cropCx = 1 - image.cropCx;
-            image.cropCx = clampCrop(image.cropCx, image, true);
-            renderPreview();
-        });
-
-        // Auto (re-detect)
-        autoBtn.addEventListener('click', async () => {
-            if (editingId === null) return;
-            const image = images.find(i => i.id === editingId);
-            if (!image) return;
-            autoBtn.disabled = true;
-            try {
-                const suggested = await autoSuggestCrop(image.bitmap);
-                image.cropCx = suggested.cx;
-                image.cropCy = suggested.cy;
-                image.autoSuggested = { cx: suggested.cx, cy: suggested.cy };
-                image.faceDetected = suggested.faceDetected;
-                image.zoom = 1.0;
-                image.rotation = 0;
-                image.flipH = false;
-                zoomRange.value = 100;
-                zoomValueEl.textContent = '1.0x';
-                image.cropCx = clampCrop(image.cropCx, image, true);
-                image.cropCy = clampCrop(image.cropCy, image, false);
-                renderPreview();
-                rebuildThumbStrip();
-                showToast('自動配置を実行しました');
-            } catch (e) {
-                console.error(e);
-                showToast('自動配置に失敗しました');
-            } finally {
-                autoBtn.disabled = false;
-            }
-        });
-
-        // Reset
-        resetBtn.addEventListener('click', () => {
-            if (editingId === null) return;
-            const image = images.find(i => i.id === editingId);
-            if (!image) return;
-            image.cropCx = image.autoSuggested.cx;
-            image.cropCy = image.autoSuggested.cy;
-            image.zoom = 1.0;
-            image.rotation = 0;
-            image.flipH = false;
-            zoomRange.value = 100;
-            zoomValueEl.textContent = '1.0x';
-            image.cropCx = clampCrop(image.cropCx, image, true);
-            image.cropCy = clampCrop(image.cropCy, image, false);
-            renderPreview();
-        });
-
-        // Before/After toggle
-        beforeToggleBtn.addEventListener('click', () => {
-            beforeMode = !beforeMode;
-            beforeToggleBtn.classList.toggle('active', beforeMode);
-            beforeBadge.style.display = beforeMode ? 'block' : 'none';
-            updatePreviewFilter();
-            renderPreview();
-        });
-
-        // Remove current
-        removeOneBtn.addEventListener('click', removeCurrent);
-
-        // Preset buttons
-        document.querySelectorAll('.preset-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
-                document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
-                btn.classList.add('active');
-                global.preset = btn.dataset.preset;
-                updatePreviewFilter();
-            });
-        });
-
-        // Filter sliders
+        // Blur slider - per image
         blurRange.addEventListener('input', () => {
-            global.blur = parseInt(blurRange.value, 10);
-            blurValueEl.textContent = `${global.blur}px`;
-            updatePreviewFilter();
-        });
-        brightnessRange.addEventListener('input', () => {
-            global.brightness = parseInt(brightnessRange.value, 10);
-            brightnessValueEl.textContent = global.brightness >= 0 ? `+${global.brightness}` : `${global.brightness}`;
-            updatePreviewFilter();
-        });
-        contrastRange.addEventListener('input', () => {
-            global.contrast = parseInt(contrastRange.value, 10);
-            contrastValueEl.textContent = global.contrast >= 0 ? `+${global.contrast}` : `${global.contrast}`;
-            updatePreviewFilter();
-        });
-        saturationRange.addEventListener('input', () => {
-            global.saturation = parseInt(saturationRange.value, 10);
-            saturationValueEl.textContent = global.saturation >= 0 ? `+${global.saturation}` : `${global.saturation}`;
+            if (editingId === null) return;
+            const image = images.find(i => i.id === editingId);
+            if (!image) return;
+            image.blur = parseInt(blurRange.value, 10);
+            blurValueEl.textContent = `${image.blur}`;
             updatePreviewFilter();
         });
 
-        // Outputs
-        downloadSingleBtn.addEventListener('click', downloadSingleCurrent);
-        downloadAllBtn.addEventListener('click', downloadAllAsZip);
+        // Brightness slider - per image
+        brightnessRange.addEventListener('input', () => {
+            if (editingId === null) return;
+            const image = images.find(i => i.id === editingId);
+            if (!image) return;
+            image.brightness = parseInt(brightnessRange.value, 10);
+            brightnessValueEl.textContent = image.brightness >= 0 ? `+${image.brightness}` : `${image.brightness}`;
+            updatePreviewFilter();
+        });
+
+        // Actions
+        downloadBtn.addEventListener('click', downloadCurrent);
+        resetBtn.addEventListener('click', resetCurrent);
+        removeOneBtn.addEventListener('click', removeCurrent);
         clearAllBtn.addEventListener('click', clearAll);
 
-        // Window resize
+        // Resize
         let resizeTimer = null;
         window.addEventListener('resize', () => {
             if (resizeTimer) clearTimeout(resizeTimer);
@@ -1072,7 +767,7 @@
             }, 100);
         });
 
-        attachPointerHandlers();
+        attachDragHandlers();
     }
 
 })();
