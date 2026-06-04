@@ -551,8 +551,10 @@
             const blob = await processForOutput(image);
             const aspectTag = aspectRatio === '1:1' ? '1x1' : '9x16';
             const baseName = image.name.replace(/\.[^/.]+$/, '');
-            triggerDownload(blob, `${baseName}_${aspectTag}.jpg`);
-            showToast('ダウンロードしました');
+            const result = await triggerDownload(blob, `${baseName}_${aspectTag}.jpg`);
+            if (result === 'shared') showToast('保存・共有しました');
+            else if (result === 'downloaded') showToast('ダウンロードしました');
+            // 'canceled'（共有シートを閉じた）は何も出さない
         } catch (err) {
             console.error(err);
             showToast('ダウンロードに失敗');
@@ -561,7 +563,28 @@
         }
     }
 
-    function triggerDownload(blob, filename) {
+    // blob を保存する。スマホ（タッチ端末）は共有シート（写真へ保存／他アプリ送信）、
+    // それ以外は従来の <a download> でダウンロード。
+    // 戻り値: 'shared' | 'downloaded' | 'canceled'
+    async function triggerDownload(blob, filename) {
+        // --- スマホ優先: Web Share API でファイル共有 ---
+        // アプリ内ブラウザ（Instagram/LINE等）は <a download> が効かず
+        // 「ファイルのダウンロードには対応していません」となるため、こちらを主経路にする。
+        if (typeof File !== 'undefined' && navigator.canShare) {
+            const file = new File([blob], filename, { type: 'image/jpeg' });
+            if (navigator.canShare({ files: [file] }) &&
+                window.matchMedia('(pointer: coarse)').matches) {
+                try {
+                    await navigator.share({ files: [file] });
+                    return 'shared';
+                } catch (err) {
+                    if (err && err.name === 'AbortError') return 'canceled';
+                    // それ以外（共有失敗）は下のダウンロードにフォールバック
+                }
+            }
+        }
+
+        // --- PC・フォールバック: 従来のダウンロード ---
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -570,6 +593,7 @@
         a.click();
         document.body.removeChild(a);
         setTimeout(() => URL.revokeObjectURL(url), 1000);
+        return 'downloaded';
     }
 
     // ---- Reset current ----
