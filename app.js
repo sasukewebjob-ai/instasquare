@@ -378,6 +378,39 @@
         }
     }
 
+    // ---- Output blur: プレビュー(CSS blur)と同じ見え方になるよう換算して適用 ----
+    // ctx.filter 対応環境では blur(...) を使い、半径 = blur × (出力幅 / プレビュー表示幅)。
+    // ぼけた層をシャープ層の上に重ねて端の黒フチ(フェード)を防ぐ。非対応なら縮小方式にフォールバック。
+    const SUPPORTS_CANVAS_FILTER = (() => {
+        try {
+            const c = document.createElement('canvas').getContext('2d');
+            c.filter = 'blur(1px)';
+            return c.filter === 'blur(1px)';
+        } catch (e) {
+            return false;
+        }
+    })();
+
+    function applyOutputBlur(outCanvas, oc, image, out) {
+        if (image.blur <= 0) return;
+        const dpr = previewCanvas._dpr || 1;
+        const previewDisplayW = (previewCanvas.width / dpr) || out.w;
+        const radius = image.blur * (out.w / previewDisplayW);
+
+        if (SUPPORTS_CANVAS_FILTER) {
+            const temp = document.createElement('canvas');
+            temp.width = out.w;
+            temp.height = out.h;
+            const tc = temp.getContext('2d');
+            tc.filter = `blur(${radius}px)`;
+            tc.drawImage(outCanvas, 0, 0);
+            tc.filter = 'none';
+            oc.drawImage(temp, 0, 0); // ぼけ層をシャープ層に重ねる（端フェード防止）
+        } else {
+            applyDownscaleBlur(outCanvas, image.blur);
+        }
+    }
+
     // ---- Process for output ----
     async function processForOutput(image) {
         const out = getOutputSize();
@@ -391,9 +424,7 @@
 
         drawImageWithCrop(oc, image, out.w, out.h, out.w, out.h);
 
-        if (image.blur > 0) {
-            applyDownscaleBlur(outCanvas, image.blur);
-        }
+        applyOutputBlur(outCanvas, oc, image, out);
 
         if (image.brightness !== 0) {
             const temp = document.createElement('canvas');
