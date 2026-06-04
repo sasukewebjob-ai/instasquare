@@ -563,17 +563,22 @@
         }
     }
 
-    // blob を保存する。スマホ（タッチ端末）は共有シート（写真へ保存／他アプリ送信）、
-    // それ以外は従来の <a download> でダウンロード。
+    // blob を保存する。
+    // 通常ブラウザ（Android Chrome / PC）は <a download> で「即ダウンロード保存」。
+    // アプリ内ブラウザ（Instagram/LINE等）と iOS は <a download> が効かない/不安定なため、
+    // Web Share API（共有・保存シート）にフォールバックする。
     // 戻り値: 'shared' | 'downloaded' | 'canceled'
     async function triggerDownload(blob, filename) {
-        // --- スマホ優先: Web Share API でファイル共有 ---
-        // アプリ内ブラウザ（Instagram/LINE等）は <a download> が効かず
-        // 「ファイルのダウンロードには対応していません」となるため、こちらを主経路にする。
-        if (typeof File !== 'undefined' && navigator.canShare) {
+        const ua = navigator.userAgent || '';
+        // アプリ内ブラウザ（<a download> が無効化される）の検出
+        const inAppBrowser = /Line\/|Instagram|FBAN|FBAV|FB_IAB|Twitter|MicroMessenger|; wv\)/i.test(ua);
+        // iOS は <a download> が不安定（タブ内に開いてしまう）なので共有シート側へ
+        const isIOS = /iPhone|iPad|iPod/i.test(ua);
+
+        // --- アプリ内ブラウザ / iOS のみ: Web Share API ---
+        if ((inAppBrowser || isIOS) && typeof File !== 'undefined' && navigator.canShare) {
             const file = new File([blob], filename, { type: 'image/jpeg' });
-            if (navigator.canShare({ files: [file] }) &&
-                window.matchMedia('(pointer: coarse)').matches) {
+            if (navigator.canShare({ files: [file] })) {
                 try {
                     await navigator.share({ files: [file] });
                     return 'shared';
@@ -584,7 +589,7 @@
             }
         }
 
-        // --- PC・フォールバック: 従来のダウンロード ---
+        // --- 通常ブラウザ（Android Chrome / PC）: 直接ダウンロード＝即ストレージ保存 ---
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
