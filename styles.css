@@ -203,6 +203,45 @@ body::before {
     white-space: nowrap;
 }
 
+/* 長押し保存オーバーレイ（共有シート非対応のiOS/アプリ内ブラウザ向け） */
+.save-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 300;
+    background: rgba(10, 10, 15, 0.97);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    padding: 24px;
+}
+
+.save-overlay img {
+    max-width: 88vw;
+    max-height: 58vh;
+    border-radius: 10px;
+    border: 1px solid var(--border-highlight);
+    -webkit-touch-callout: default;
+    -webkit-user-select: auto;
+    user-select: auto;
+}
+
+.save-overlay-hint {
+    color: var(--text-primary);
+    text-align: center;
+    font-size: 0.9rem;
+    line-height: 1.7;
+}
+
+.save-overlay-hint strong {
+    color: #f09433;
+}
+
+.save-overlay-close {
+    min-width: 150px;
+}
+
 .aspect-1-1 {
     width: 11px;
     height: 11px;
@@ -407,6 +446,8 @@ body::before {
     touch-action: none;
     user-select: none;
     -webkit-user-select: none;
+    /* プレビュー長押し保存を禁止（CSSフィルターは保存画像に乗らず、補正なしで保存されてしまうため） */
+    -webkit-touch-callout: none;
     cursor: grab;
     max-width: 100%;
 }

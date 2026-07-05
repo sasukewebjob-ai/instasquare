@@ -404,11 +404,22 @@
     // ---- Output blur: プレビュー(CSS blur)と同じ見え方になるよう換算して適用 ----
     // ctx.filter 対応環境では blur(...) を使い、半径 = blur × (出力幅 / プレビュー表示幅)。
     // ぼけた層をシャープ層の上に重ねて端の黒フチ(フェード)を防ぐ。非対応なら縮小方式にフォールバック。
+    //
+    // 対応判定は「実際に描画してにじみが出るか」のピクセル検証で行う。
+    // ※プロパティの読み書きだけの判定は不可：iOS 17以前のSafariは filter が
+    //   未実装でも代入値がそのまま読み返せるため誤って「対応」になり、
+    //   ぼかし・明るさが無反映の画像が保存されるバグの原因になった。
     const SUPPORTS_CANVAS_FILTER = (() => {
         try {
-            const c = document.createElement('canvas').getContext('2d');
-            c.filter = 'blur(1px)';
-            return c.filter === 'blur(1px)';
+            const c = document.createElement('canvas');
+            c.width = 10;
+            c.height = 10;
+            const x = c.getContext('2d');
+            x.filter = 'blur(3px)';
+            x.fillStyle = '#fff';
+            x.fillRect(4, 4, 2, 2);
+            // filterが本当に効いていれば矩形の外(1px左)ににじみが出る
+            return x.getImageData(3, 5, 1, 1).data[3] > 0;
         } catch (e) {
             return false;
         }
@@ -626,7 +637,7 @@
             const result = await triggerDownload(blob, `${baseName}_${aspectTag}.jpg`);
             if (result === 'shared') showToast('保存・共有しました');
             else if (result === 'downloaded') showToast('ダウンロードしました');
-            // 'canceled'（共有シートを閉じた）は何も出さない
+            // 'canceled'（共有シートを閉じた）と 'overlay'（案内表示中）は何も出さない
         } catch (err) {
             console.error(err);
             showToast('ダウンロードに失敗');
@@ -638,27 +649,35 @@
     // blob を保存する。
     // 通常ブラウザ（Android Chrome / PC）は <a download> で「即ダウンロード保存」。
     // アプリ内ブラウザ（Instagram/LINE等）と iOS は <a download> が効かない/不安定なため、
-    // Web Share API（共有・保存シート）にフォールバックする。
-    // 戻り値: 'shared' | 'downloaded' | 'canceled'
+    // ①Web Share API（共有・保存シート）→ ②長押し保存オーバーレイ の順で確実な手段に落とす。
+    // 戻り値: 'shared' | 'downloaded' | 'canceled' | 'overlay'
     async function triggerDownload(blob, filename) {
         const ua = navigator.userAgent || '';
         // アプリ内ブラウザ（<a download> が無効化される）の検出
         const inAppBrowser = /Line\/|Instagram|FBAN|FBAV|FB_IAB|Twitter|MicroMessenger|; wv\)/i.test(ua);
-        // iOS は <a download> が不安定（タブ内に開いてしまう）なので共有シート側へ
-        const isIOS = /iPhone|iPad|iPod/i.test(ua);
+        // iOS は <a download> が不安定（タブ内に開いてしまう）なので共有シート側へ。
+        // iPadOS 13+ は "Macintosh" を名乗るため maxTouchPoints でも判定する
+        const isIOS = /iPhone|iPad|iPod/i.test(ua) ||
+            (/Macintosh/i.test(ua) && navigator.maxTouchPoints > 1);
 
-        // --- アプリ内ブラウザ / iOS のみ: Web Share API ---
-        if ((inAppBrowser || isIOS) && typeof File !== 'undefined' && navigator.canShare) {
-            const file = new File([blob], filename, { type: 'image/jpeg' });
-            if (navigator.canShare({ files: [file] })) {
-                try {
-                    await navigator.share({ files: [file] });
-                    return 'shared';
-                } catch (err) {
-                    if (err && err.name === 'AbortError') return 'canceled';
-                    // それ以外（共有失敗）は下のダウンロードにフォールバック
+        if (inAppBrowser || isIOS) {
+            // --- ① Web Share API（対応環境では「画像を保存」が使える） ---
+            if (typeof File !== 'undefined' && navigator.canShare) {
+                const file = new File([blob], filename, { type: 'image/jpeg' });
+                if (navigator.canShare({ files: [file] })) {
+                    try {
+                        await navigator.share({ files: [file] });
+                        return 'shared';
+                    } catch (err) {
+                        if (err && err.name === 'AbortError') return 'canceled';
+                        // NotAllowedError（ユーザー操作の有効期限切れ）等 → ②へ
+                    }
                 }
             }
+            // --- ② 最終手段: 画像を全画面表示して長押し保存してもらう ---
+            // 共有シート自体が無い/失敗する古いiOS・アプリ内ブラウザでも必ず保存経路が残る
+            showSaveOverlay(blob);
+            return 'overlay';
         }
 
         // --- 通常ブラウザ（Android Chrome / PC）: 直接ダウンロード＝即ストレージ保存 ---
@@ -671,6 +690,49 @@
         document.body.removeChild(a);
         setTimeout(() => URL.revokeObjectURL(url), 1000);
         return 'downloaded';
+    }
+
+    // 加工済み画像を全画面オーバーレイに表示し、長押し→「写真に追加」で保存してもらう。
+    // blob URLは長押しメニューに「写真に追加」が出ない環境があるため data URL を使う
+    function showSaveOverlay(blob) {
+        const reader = new FileReader();
+        reader.onload = () => {
+            const overlay = document.createElement('div');
+            overlay.className = 'save-overlay';
+
+            const strong = (t) => {
+                const s = document.createElement('strong');
+                s.textContent = t;
+                return s;
+            };
+            const hint = document.createElement('p');
+            hint.className = 'save-overlay-hint';
+            hint.appendChild(document.createTextNode('下の画像を'));
+            hint.appendChild(strong('長押し'));
+            hint.appendChild(document.createTextNode('して'));
+            hint.appendChild(document.createElement('br'));
+            hint.appendChild(document.createTextNode('「'));
+            hint.appendChild(strong('写真に追加'));
+            hint.appendChild(document.createTextNode('」または「'));
+            hint.appendChild(strong('画像を保存'));
+            hint.appendChild(document.createTextNode('」を選んでください'));
+
+            const img = document.createElement('img');
+            img.src = reader.result;
+            img.alt = '保存する画像';
+
+            const close = document.createElement('button');
+            close.type = 'button';
+            close.className = 'btn btn-secondary save-overlay-close';
+            close.textContent = '閉じる';
+            close.addEventListener('click', () => overlay.remove());
+
+            overlay.appendChild(hint);
+            overlay.appendChild(img);
+            overlay.appendChild(close);
+            document.body.appendChild(overlay);
+        };
+        reader.readAsDataURL(blob);
     }
 
     // ---- Reset current ----
