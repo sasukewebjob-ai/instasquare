@@ -78,8 +78,14 @@
         }
     }
 
+    const OUTPUT_SIZES = {
+        '1:1': { w: 1080, h: 1080 },
+        '4:3': { w: 1440, h: 1080 },
+        '9:16': { w: 1080, h: 1920 }
+    };
+
     function getOutputSize() {
-        return aspectRatio === '1:1' ? { w: 1080, h: 1080 } : { w: 1080, h: 1920 };
+        return OUTPUT_SIZES[aspectRatio] || OUTPUT_SIZES['1:1'];
     }
 
     // ---- Image load with EXIF orientation ----
@@ -348,34 +354,51 @@
         previewCanvas.style.filter = previewFilterString(image);
     }
 
-    // ---- Downscale blur for output (artifact-free) ----
-    function applyDownscaleBlur(canvas, amount) {
-        if (amount <= 0) return;
+    // ---- Downscale blur for output (ctx.filter 非対応環境のフォールバック) ----
+    // radius = ctx.filter blur(radius px) 相当の強さ。
+    // 目標半径から縮小率を逆算し、半減を繰り返して縮小→段階的に拡大で戻す
+    // （バイリニア補間の累積でガウシアン風のぼかしになる。端の黒フチも出ない）
+    function applyDownscaleBlur(canvas, radius) {
+        if (radius <= 0) return;
         const ctx = canvas.getContext('2d');
-        const finalW = canvas.width;
-        const finalH = canvas.height;
+        const w = canvas.width;
+        const h = canvas.height;
+        const targetScale = 1 / Math.max(1, radius / 6);
 
-        // amount is 0..20; map to passes/scaleFactor similar to before
-        const passes = Math.min(Math.max(1, Math.ceil(amount / 2)), 10);
-        const scaleFactor = Math.max(0.05, 1 - (amount / 25));
+        const a = document.createElement('canvas');
+        const b = document.createElement('canvas');
+        a.width = w; a.height = h;
+        a.getContext('2d').drawImage(canvas, 0, 0);
 
-        const temp = document.createElement('canvas');
-        const tctx = temp.getContext('2d');
+        let src = a, dst = b, cw = w, ch = h;
 
-        for (let i = 0; i < passes; i++) {
-            const smallW = Math.max(2, Math.round(finalW * scaleFactor));
-            const smallH = Math.max(2, Math.round(finalH * scaleFactor));
-            temp.width = smallW;
-            temp.height = smallH;
-            tctx.imageSmoothingEnabled = true;
-            tctx.imageSmoothingQuality = 'high';
-            tctx.drawImage(canvas, 0, 0, smallW, smallH);
+        const step = (nw, nh) => {
+            dst.width = Math.max(dst.width, nw);
+            dst.height = Math.max(dst.height, nh);
+            const dctx = dst.getContext('2d');
+            dctx.imageSmoothingEnabled = true;
+            dctx.imageSmoothingQuality = 'high';
+            dctx.drawImage(src, 0, 0, cw, ch, 0, 0, nw, nh);
+            const t = src; src = dst; dst = t;
+            cw = nw; ch = nh;
+        };
 
-            ctx.imageSmoothingEnabled = true;
-            ctx.imageSmoothingQuality = 'high';
-            ctx.clearRect(0, 0, finalW, finalH);
-            ctx.drawImage(temp, 0, 0, finalW, finalH);
+        // 半減を繰り返して目標縮小率まで落とす
+        while (cw * 0.5 > w * targetScale && cw > 4 && ch > 4) {
+            step(Math.max(2, Math.round(cw * 0.5)), Math.max(2, Math.round(ch * 0.5)));
         }
+        const fw = Math.max(2, Math.round(w * targetScale));
+        const fh = Math.max(2, Math.round(h * targetScale));
+        if (fw < cw && fh < ch) step(fw, fh);
+
+        // 段階的に拡大して戻す
+        while (cw * 2 < w) {
+            step(Math.min(w, cw * 2), Math.min(h, ch * 2));
+        }
+
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(src, 0, 0, cw, ch, 0, 0, w, h);
     }
 
     // ---- Output blur: プレビュー(CSS blur)と同じ見え方になるよう換算して適用 ----
@@ -407,8 +430,22 @@
             tc.filter = 'none';
             oc.drawImage(temp, 0, 0); // ぼけ層をシャープ層に重ねる（端フェード防止）
         } else {
-            applyDownscaleBlur(outCanvas, image.blur);
+            applyDownscaleBlur(outCanvas, radius);
         }
+    }
+
+    // ---- Brightness fallback (ctx.filter 非対応 = 古いSafari等) ----
+    // CSS brightness() と同じ線形乗算をピクセル直接操作で再現する
+    function applyBrightnessPixels(canvas, ctx, brightness) {
+        const factor = 1 + brightness / 200;
+        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const d = imgData.data;
+        for (let i = 0; i < d.length; i += 4) {
+            d[i] = Math.min(255, d[i] * factor);
+            d[i + 1] = Math.min(255, d[i + 1] * factor);
+            d[i + 2] = Math.min(255, d[i + 2] * factor);
+        }
+        ctx.putImageData(imgData, 0, 0);
     }
 
     // ---- Process for output ----
@@ -427,15 +464,19 @@
         applyOutputBlur(outCanvas, oc, image, out);
 
         if (image.brightness !== 0) {
-            const temp = document.createElement('canvas');
-            temp.width = out.w;
-            temp.height = out.h;
-            const tc = temp.getContext('2d');
-            tc.filter = `brightness(${1 + image.brightness / 200})`;
-            tc.drawImage(outCanvas, 0, 0);
-            tc.filter = 'none';
-            oc.clearRect(0, 0, out.w, out.h);
-            oc.drawImage(temp, 0, 0);
+            if (SUPPORTS_CANVAS_FILTER) {
+                const temp = document.createElement('canvas');
+                temp.width = out.w;
+                temp.height = out.h;
+                const tc = temp.getContext('2d');
+                tc.filter = `brightness(${1 + image.brightness / 200})`;
+                tc.drawImage(outCanvas, 0, 0);
+                tc.filter = 'none';
+                oc.clearRect(0, 0, out.w, out.h);
+                oc.drawImage(temp, 0, 0);
+            } else {
+                applyBrightnessPixels(outCanvas, oc, image.brightness);
+            }
         }
 
         return new Promise((resolve, reject) => {
@@ -580,7 +621,7 @@
         downloadBtn.disabled = true;
         try {
             const blob = await processForOutput(image);
-            const aspectTag = aspectRatio === '1:1' ? '1x1' : '9x16';
+            const aspectTag = aspectRatio.replace(':', 'x');
             const baseName = image.name.replace(/\.[^/.]+$/, '');
             const result = await triggerDownload(blob, `${baseName}_${aspectTag}.jpg`);
             if (result === 'shared') showToast('保存・共有しました');
