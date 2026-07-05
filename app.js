@@ -80,7 +80,7 @@
 
     const OUTPUT_SIZES = {
         '1:1': { w: 1080, h: 1080 },
-        '3:4': { w: 1080, h: 1440 },
+        '4:3': { w: 1440, h: 1080 },
         '9:16': { w: 1080, h: 1920 }
     };
 
@@ -354,99 +354,92 @@
         previewCanvas.style.filter = previewFilterString(image);
     }
 
-    // ---- Downscale blur for output (ctx.filter 非対応環境のフォールバック) ----
-    // radius = ctx.filter blur(radius px) 相当の強さ。
-    // 目標半径から縮小率を逆算し、半減を繰り返して縮小→段階的に拡大で戻す
-    // （バイリニア補間の累積でガウシアン風のぼかしになる。端の黒フチも出ない）
-    function applyDownscaleBlur(canvas, radius) {
-        if (radius <= 0) return;
-        const ctx = canvas.getContext('2d');
-        const w = canvas.width;
-        const h = canvas.height;
-        const targetScale = 1 / Math.max(1, radius / 6);
-
-        const a = document.createElement('canvas');
-        const b = document.createElement('canvas');
-        a.width = w; a.height = h;
-        a.getContext('2d').drawImage(canvas, 0, 0);
-
-        let src = a, dst = b, cw = w, ch = h;
-
-        const step = (nw, nh) => {
-            dst.width = Math.max(dst.width, nw);
-            dst.height = Math.max(dst.height, nh);
-            const dctx = dst.getContext('2d');
-            dctx.imageSmoothingEnabled = true;
-            dctx.imageSmoothingQuality = 'high';
-            dctx.drawImage(src, 0, 0, cw, ch, 0, 0, nw, nh);
-            const t = src; src = dst; dst = t;
-            cw = nw; ch = nh;
-        };
-
-        // 半減を繰り返して目標縮小率まで落とす
-        while (cw * 0.5 > w * targetScale && cw > 4 && ch > 4) {
-            step(Math.max(2, Math.round(cw * 0.5)), Math.max(2, Math.round(ch * 0.5)));
-        }
-        const fw = Math.max(2, Math.round(w * targetScale));
-        const fh = Math.max(2, Math.round(h * targetScale));
-        if (fw < cw && fh < ch) step(fw, fh);
-
-        // 段階的に拡大して戻す
-        while (cw * 2 < w) {
-            step(Math.min(w, cw * 2), Math.min(h, ch * 2));
-        }
-
-        ctx.imageSmoothingEnabled = true;
-        ctx.imageSmoothingQuality = 'high';
-        ctx.drawImage(src, 0, 0, cw, ch, 0, 0, w, h);
-    }
-
     // ---- Output blur: プレビュー(CSS blur)と同じ見え方になるよう換算して適用 ----
-    // ctx.filter 対応環境では blur(...) を使い、半径 = blur × (出力幅 / プレビュー表示幅)。
-    // ぼけた層をシャープ層の上に重ねて端の黒フチ(フェード)を防ぐ。非対応なら縮小方式にフォールバック。
+    // CSS の blur(Npx) は標準偏差 σ=N のガウシアンぼかし。
+    // 出力では σ = スライダー値 × (出力幅 / プレビュー表示幅) に換算する。
     //
-    // 対応判定は「実際に描画してにじみが出るか」のピクセル検証で行う。
-    // ※プロパティの読み書きだけの判定は不可：iOS 17以前のSafariは filter が
-    //   未実装でも代入値がそのまま読み返せるため誤って「対応」になり、
-    //   ぼかし・明るさが無反映の画像が保存されるバグの原因になった。
-    const SUPPORTS_CANVAS_FILTER = (() => {
-        try {
-            const c = document.createElement('canvas');
-            c.width = 10;
-            c.height = 10;
-            const x = c.getContext('2d');
-            x.filter = 'blur(3px)';
-            x.fillStyle = '#fff';
-            x.fillRect(4, 4, 2, 2);
-            // filterが本当に効いていれば矩形の外(1px左)ににじみが出る
-            return x.getImageData(3, 5, 1, 1).data[3] > 0;
-        } catch (e) {
-            return false;
-        }
-    })();
-
+    // ctx.filter は使わない：iOS(WebKit)は非対応で、旧実装の「縮小→拡大」フォールバックは
+    // 原理的に大半径を再現できず（iPhoneはプレビュー幅が小さく必要半径が約30pxと大きい）、
+    // プレビューよりはるかに弱いぼかしで保存される実バグの原因だった。
+    // 代わりに全環境共通の自前ボックスブラー3回合成（ガウシアン近似の標準手法）を
+    // ピクセル直接操作で適用する。環境依存の分岐を持たないため PC / iPhone で結果が一致する。
     function applyOutputBlur(outCanvas, oc, image, out) {
         if (image.blur <= 0) return;
         const dpr = previewCanvas._dpr || 1;
         const previewDisplayW = (previewCanvas.width / dpr) || out.w;
-        const radius = image.blur * (out.w / previewDisplayW);
+        const sigma = image.blur * (out.w / previewDisplayW);
+        applyGaussianBlur(outCanvas, oc, sigma);
+    }
 
-        if (SUPPORTS_CANVAS_FILTER) {
-            const temp = document.createElement('canvas');
-            temp.width = out.w;
-            temp.height = out.h;
-            const tc = temp.getContext('2d');
-            tc.filter = `blur(${radius}px)`;
-            tc.drawImage(outCanvas, 0, 0);
-            tc.filter = 'none';
-            oc.drawImage(temp, 0, 0); // ぼけ層をシャープ層に重ねる（端フェード防止）
-        } else {
-            applyDownscaleBlur(outCanvas, radius);
+    // ガウシアン σ を近似する3つのボックス幅（奇数）を求める
+    // （合成分散 Σ(w²-1)/12 ≒ σ² になるよう幅を配分する標準アルゴリズム）
+    function boxesForGauss(sigma, n) {
+        const wIdeal = Math.sqrt((12 * sigma * sigma / n) + 1);
+        let wl = Math.floor(wIdeal);
+        if (wl % 2 === 0) wl--;
+        const wu = wl + 2;
+        const mIdeal = (12 * sigma * sigma - n * wl * wl - 4 * n * wl - 3 * n) / (-4 * wl - 4);
+        const m = Math.round(mIdeal);
+        const sizes = [];
+        for (let i = 0; i < n; i++) sizes.push(i < m ? wl : wu);
+        return sizes;
+    }
+
+    function applyGaussianBlur(canvas, ctx, sigma) {
+        if (sigma <= 0) return;
+        const w = canvas.width;
+        const h = canvas.height;
+        const imgData = ctx.getImageData(0, 0, w, h);
+        const src = imgData.data;
+        const tmp = new Uint8ClampedArray(src.length);
+        const maxR = Math.floor((Math.min(w, h) - 1) / 2);
+        for (const size of boxesForGauss(sigma, 3)) {
+            const r = Math.min((size - 1) / 2, maxR);
+            if (r <= 0) continue;
+            boxBlurPass(src, tmp, w, h, r, true);   // 横方向
+            boxBlurPass(tmp, src, w, h, r, false);  // 縦方向（結果は src に戻る）
+        }
+        ctx.putImageData(imgData, 0, 0);
+    }
+
+    // 移動平均（running sum）による1方向ボックスブラー。O(画素数)で半径に依存しない。
+    // 端は端ピクセルを延長して扱う（黒フチ・フェードが出ない）。RGBのみ処理（出力は常に不透明）。
+    function boxBlurPass(src, dst, w, h, r, horizontal) {
+        const lineCount = horizontal ? h : w;
+        const lineLen = horizontal ? w : h;
+        const stride = horizontal ? 4 : w * 4;
+        const iarr = 1 / (r + r + 1);
+        for (let i = 0; i < lineCount; i++) {
+            const base = (horizontal ? i * w : i) * 4;
+            for (let c = 0; c < 3; c++) {
+                let li = base + c;
+                let ri = base + r * stride + c;
+                let ti = base + c;
+                const fv = src[base + c];
+                const lv = src[base + (lineLen - 1) * stride + c];
+                let val = (r + 1) * fv;
+                for (let j = 0; j < r; j++) val += src[base + j * stride + c];
+                for (let j = 0; j <= r; j++) {
+                    val += src[ri] - fv;
+                    dst[ti] = (val * iarr + 0.5) | 0;
+                    ri += stride; ti += stride;
+                }
+                for (let j = r + 1; j < lineLen - r; j++) {
+                    val += src[ri] - src[li];
+                    dst[ti] = (val * iarr + 0.5) | 0;
+                    li += stride; ri += stride; ti += stride;
+                }
+                for (let j = Math.max(lineLen - r, r + 1); j < lineLen; j++) {
+                    val += lv - src[li];
+                    dst[ti] = (val * iarr + 0.5) | 0;
+                    li += stride; ti += stride;
+                }
+            }
         }
     }
 
-    // ---- Brightness fallback (ctx.filter 非対応 = 古いSafari等) ----
-    // CSS brightness() と同じ線形乗算をピクセル直接操作で再現する
+    // ---- Brightness ----
+    // CSS brightness() と同じ線形乗算をピクセル直接操作で再現する（全環境共通・ctx.filter不使用）
     function applyBrightnessPixels(canvas, ctx, brightness) {
         const factor = 1 + brightness / 200;
         const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -475,19 +468,7 @@
         applyOutputBlur(outCanvas, oc, image, out);
 
         if (image.brightness !== 0) {
-            if (SUPPORTS_CANVAS_FILTER) {
-                const temp = document.createElement('canvas');
-                temp.width = out.w;
-                temp.height = out.h;
-                const tc = temp.getContext('2d');
-                tc.filter = `brightness(${1 + image.brightness / 200})`;
-                tc.drawImage(outCanvas, 0, 0);
-                tc.filter = 'none';
-                oc.clearRect(0, 0, out.w, out.h);
-                oc.drawImage(temp, 0, 0);
-            } else {
-                applyBrightnessPixels(outCanvas, oc, image.brightness);
-            }
+            applyBrightnessPixels(outCanvas, oc, image.brightness);
         }
 
         return new Promise((resolve, reject) => {
