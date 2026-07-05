@@ -208,9 +208,9 @@ body::before {
     height: 11px;
 }
 
-.aspect-4-3 {
-    width: 12px;
-    height: 9px;
+.aspect-3-4 {
+    width: 9px;
+    height: 12px;
 }
 
 .aspect-9-16 {
