@@ -37,6 +37,7 @@
     const brightnessValueEl = $('brightnessValue');
 
     const downloadBtn = $('downloadBtn');
+    const bulkSaveBtn = $('bulkSaveBtn');
     const resetBtn = $('resetBtn');
     const removeOneBtn = $('removeOneBtn');
     const clearAllBtn = $('clearAllBtn');
@@ -54,6 +55,10 @@
     let nextId = 1;
     let faceDetector = null;
     let faceDetectionSupported = false;
+
+    // 一括保存の実行状態（多重起動防止・キャンセル用）
+    let bulkRunning = false;
+    let bulkCancelRequested = false;
 
     // Pointer / drag / pinch
     const activePointers = new Map();
@@ -627,12 +632,9 @@
         }
     }
 
-    // blob を保存する。
-    // 通常ブラウザ（Android Chrome / PC）は <a download> で「即ダウンロード保存」。
-    // アプリ内ブラウザ（Instagram/LINE等）と iOS は <a download> が効かない/不安定なため、
-    // ①Web Share API（共有・保存シート）→ ②長押し保存オーバーレイ の順で確実な手段に落とす。
-    // 戻り値: 'shared' | 'downloaded' | 'canceled' | 'overlay'
-    async function triggerDownload(blob, filename) {
+    // <a download> が使えず共有シート経路が必要な環境か（アプリ内ブラウザ・iOS）。
+    // UAの上書きテストができるよう、モジュール定数にせず呼び出し時に毎回判定する
+    function needsSharePath() {
         const ua = navigator.userAgent || '';
         // アプリ内ブラウザ（<a download> が無効化される）の検出
         const inAppBrowser = /Line\/|Instagram|FBAN|FBAV|FB_IAB|Twitter|MicroMessenger|; wv\)/i.test(ua);
@@ -640,8 +642,16 @@
         // iPadOS 13+ は "Macintosh" を名乗るため maxTouchPoints でも判定する
         const isIOS = /iPhone|iPad|iPod/i.test(ua) ||
             (/Macintosh/i.test(ua) && navigator.maxTouchPoints > 1);
+        return inAppBrowser || isIOS;
+    }
 
-        if (inAppBrowser || isIOS) {
+    // blob を保存する。
+    // 通常ブラウザ（Android Chrome / PC）は <a download> で「即ダウンロード保存」。
+    // アプリ内ブラウザ（Instagram/LINE等）と iOS は <a download> が効かない/不安定なため、
+    // ①Web Share API（共有・保存シート）→ ②長押し保存オーバーレイ の順で確実な手段に落とす。
+    // 戻り値: 'shared' | 'downloaded' | 'canceled' | 'overlay'
+    async function triggerDownload(blob, filename) {
+        if (needsSharePath()) {
             // --- ① Web Share API（対応環境では「画像を保存」が使える） ---
             if (typeof File !== 'undefined' && navigator.canShare) {
                 const file = new File([blob], filename, { type: 'image/jpeg' });
@@ -714,6 +724,151 @@
             document.body.appendChild(overlay);
         };
         reader.readAsDataURL(blob);
+    }
+
+    // ---- Bulk save (全部保存) ----
+    // 全画像を既存の processForOutput（単体DLと完全に同一のぼかし・明るさ経路）で順に加工し、
+    // iOS/アプリ内ブラウザ: 複数ファイルまとめて共有シート（「画像を保存」でN枚一括保存）
+    // PC/Android通常ブラウザ: 1枚ずつ順に <a download>
+    // 表示する全画面オーバーレイが操作をブロックするため、加工中に画像状態が変わることはない。
+    async function bulkSaveAll() {
+        if (bulkRunning || images.length === 0) return;
+        bulkRunning = true;
+        bulkCancelRequested = false;
+
+        const overlay = showBulkOverlay();
+        overlay.oncancel = () => {
+            bulkCancelRequested = true;
+            overlay.setText('中止しています...');
+        };
+
+        const aspectTag = aspectRatio.replace(':', 'x');
+        const list = images.slice();
+        const items = [];
+
+        try {
+            for (let i = 0; i < list.length; i++) {
+                if (bulkCancelRequested) return;
+                overlay.setText(`画像を加工中... (${i + 1}/${list.length})`);
+                // 進捗表示を描画してから重い同期処理（ぼかし）に入る
+                await new Promise(r => setTimeout(r, 30));
+                if (bulkCancelRequested) return;
+                const blob = await processForOutput(list[i]);
+                const baseName = list[i].name.replace(/\.[^/.]+$/, '');
+                items.push({ blob, filename: `${baseName}_${aspectTag}.jpg` });
+            }
+            if (bulkCancelRequested) return;
+
+            const result = await deliverAllItems(items, overlay);
+            if (result === 'shared') showToast(`${items.length}枚を保存・共有しました`);
+            else if (result === 'downloaded') showToast(`${items.length}枚をダウンロードしました`);
+            else if (result === 'unsupported') showToast('この環境では一括保存に対応していません。1枚ずつ保存してください');
+            else if (result === 'failed') showToast('保存できませんでした。1枚ずつ保存をお試しください');
+            // 'canceled' は何も出さない
+        } catch (err) {
+            console.error(err);
+            showToast('一括保存に失敗しました');
+        } finally {
+            overlay.close();
+            bulkRunning = false;
+        }
+    }
+
+    // 加工済みの全itemsを保存する。戻り値: 'shared' | 'downloaded' | 'canceled' | 'unsupported' | 'failed'
+    async function deliverAllItems(items, overlay) {
+        if (needsSharePath()) {
+            if (typeof File === 'undefined' || !navigator.canShare) return 'unsupported';
+            const files = items.map(it => new File([it.blob], it.filename, { type: 'image/jpeg' }));
+            if (!navigator.canShare({ files })) return 'unsupported';
+
+            // まずそのまま共有を試す（加工が短時間ならタップの有効期限内に収まり1タップで完了）
+            try {
+                await navigator.share({ files });
+                return 'shared';
+            } catch (err) {
+                if (err && err.name === 'AbortError') return 'canceled';
+                // NotAllowedError（タップの有効期限切れ）等
+                // → Safariは「タップ直後」しか共有シートを開けないため、もう1タップもらって開き直す
+            }
+            return await new Promise((resolve) => {
+                overlay.oncancel = () => resolve('canceled');
+                overlay.showReady(`${files.length}枚の準備ができました`, async () => {
+                    try {
+                        await navigator.share({ files });
+                        resolve('shared');
+                    } catch (err2) {
+                        resolve(err2 && err2.name === 'AbortError' ? 'canceled' : 'failed');
+                    }
+                });
+            });
+        }
+
+        // PC / Android通常ブラウザ: 1枚ずつ順にダウンロード
+        // （ブラウザが「複数ファイルのダウンロードを許可」を出す場合は許可してもらう）
+        overlay.setText('ダウンロード中...');
+        for (let i = 0; i < items.length; i++) {
+            const url = URL.createObjectURL(items[i].blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = items[i].filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 3000);
+            if (i < items.length - 1) await new Promise(r => setTimeout(r, 350));
+        }
+        return 'downloaded';
+    }
+
+    // 一括保存の進捗・完了操作を出す全画面オーバーレイ（表示中は他UIを触れない）
+    function showBulkOverlay() {
+        const overlay = document.createElement('div');
+        overlay.className = 'save-overlay bulk-overlay';
+
+        const spinner = document.createElement('div');
+        spinner.className = 'spinner';
+
+        const text = document.createElement('p');
+        text.className = 'save-overlay-hint';
+
+        const cancel = document.createElement('button');
+        cancel.type = 'button';
+        cancel.className = 'btn btn-secondary save-overlay-close';
+        cancel.textContent = 'キャンセル';
+
+        overlay.appendChild(spinner);
+        overlay.appendChild(text);
+        overlay.appendChild(cancel);
+        document.body.appendChild(overlay);
+
+        const api = {
+            oncancel: null,
+            setText(msg) {
+                text.textContent = msg;
+            },
+            // 加工完了後の「もう1タップ」画面に切り替える（保存ボタンを出す）
+            showReady(msg, onSave) {
+                spinner.style.display = 'none';
+                text.textContent = msg;
+                const save = document.createElement('button');
+                save.type = 'button';
+                save.className = 'btn btn-primary save-overlay-save';
+                save.textContent = '写真に保存する';
+                save.addEventListener('click', () => {
+                    save.disabled = true;
+                    onSave();
+                });
+                overlay.insertBefore(save, cancel);
+            },
+            close() {
+                overlay.remove();
+            }
+        };
+        cancel.addEventListener('click', () => {
+            cancel.disabled = true;
+            if (api.oncancel) api.oncancel();
+        });
+        return api;
     }
 
     // ---- Reset current ----
@@ -1000,6 +1155,7 @@
 
         // Actions
         downloadBtn.addEventListener('click', downloadCurrent);
+        bulkSaveBtn.addEventListener('click', bulkSaveAll);
         resetBtn.addEventListener('click', resetCurrent);
         removeOneBtn.addEventListener('click', removeCurrent);
         clearAllBtn.addEventListener('click', clearAll);

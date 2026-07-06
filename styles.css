@@ -242,6 +242,16 @@ body::before {
     min-width: 150px;
 }
 
+/* 一括保存オーバーレイ（進捗・保存ボタン） */
+.bulk-overlay .spinner {
+    width: 30px;
+    height: 30px;
+}
+
+.save-overlay-save {
+    min-width: 200px;
+}
+
 .aspect-1-1 {
     width: 11px;
     height: 11px;
@@ -547,9 +557,7 @@ body::before {
     gap: 6px;
 }
 
-.editor-actions .btn-primary {
-    grid-column: 1 / -1;
-}
+/* 1行目: 「この1枚を保存」「全部保存」を横並び（グリッド2列のまま） */
 
 .editor-actions #clearAllBtn {
     grid-column: 1 / -1;
